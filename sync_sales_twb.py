@@ -21,9 +21,15 @@ def sync_sales_twb():
     source_file = repo_root / "Live" / "Sales.twbx"
     dest_file = repo_root / "Live" / "Customers" / "Sales.twbx"
     
+    print(f"Repository root: {repo_root}")
+    print(f"Source file: {source_file}")
+    print(f"Destination file: {dest_file}")
+    
     # Check if source file exists
     if not source_file.exists():
         print(f"Error: Source file not found: {source_file}")
+        print(f"Current directory: {Path.cwd()}")
+        print(f"Files in Live/: {list((repo_root / 'Live').glob('*')) if (repo_root / 'Live').exists() else 'Live/ does not exist'}")
         return 1
     
     # Create destination directory if it doesn't exist
@@ -472,5 +478,12 @@ def apply_changes_manually(source_file, dest_file, diff_output):
         return 1
 
 if __name__ == "__main__":
-    sys.exit(sync_sales_twb())
+    try:
+        exit_code = sync_sales_twb()
+        sys.exit(exit_code)
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 

@@ -31,9 +31,10 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Sync Sales.twb
+      - name: Sync Sales.twbx
         run: |
-          python sync_sales_twb.py
+          python3 sync_sales_twb.py
+        continue-on-error: false
 
       - name: Check for changes
         id: verify-changed-files

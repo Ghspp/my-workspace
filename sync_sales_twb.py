@@ -221,8 +221,6 @@ def apply_twbx_changes(source_file, dest_file, repo_root):
             
             # Get the diff of the .twb file from git
             # We need to check what changed in the source .twb
-            source_twb_rel = source_twb.relative_to(repo_root)
-            
             # Try to get diff of the .twb file from the previous version
             # First, get the previous version of the source .twbx from git
             prev_source_twb = temp_path / "prev_source.twb"

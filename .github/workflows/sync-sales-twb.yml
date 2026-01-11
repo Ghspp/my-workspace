@@ -1,0 +1,64 @@
+name: Sync Sales.twb
+
+on:
+  push:
+    branches:
+      - '*'  # Runs on all branches
+    paths:
+      - 'Live/Sales.twb'  # Only trigger when this file changes
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'Live/Sales.twb'  # Only trigger when this file changes
+
+jobs:
+  sync-file:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Sync Sales.twb
+        run: |
+          python sync_sales_twb.py
+
+      - name: Check for changes
+        id: verify-changed-files
+        run: |
+          if [ -n "$(git status --porcelain Live/Customers/Sales.twb)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push changes
+        if: steps.verify-changed-files.outputs.changed == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add Live/Customers/Sales.twb
+          git commit -m "Auto-sync: Update Sales.twb in Customers from Live" || exit 0
+          git push
+
+      - name: Update Pull Request
+        if: github.event_name == 'pull_request' && steps.verify-changed-files.outputs.changed == 'true'
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            🔄 **Auto-sync completed**
+            
+            The file `Live/Customers/Sales.twb` has been automatically updated to match `Live/Sales.twb`.
+

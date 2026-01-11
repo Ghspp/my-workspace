@@ -1,15 +1,15 @@
-name: Sync Sales.twb
+name: Sync Sales.twbx
 
 on:
   push:
     branches:
       - '*'  # Runs on all branches
     paths:
-      - 'Live/Sales.twb'  # Only trigger when this file changes
+      - 'Live/Sales.twbx'  # Only trigger when this file changes
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - 'Live/Sales.twb'  # Only trigger when this file changes
+      - 'Live/Sales.twbx'  # Only trigger when this file changes
 
 jobs:
   sync-file:
@@ -31,14 +31,14 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Sync Sales.twb
+      - name: Sync Sales.twbx
         run: |
-          python sync_sales_twb.py
+          python3 sync_sales_twb.py
 
       - name: Check for changes
         id: verify-changed-files
         run: |
-          if [ -n "$(git status --porcelain Live/Customers/Sales.twb)" ]; then
+          if [ -n "$(git status --porcelain Live/Customers/Sales.twbx)" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           else
             echo "changed=false" >> $GITHUB_OUTPUT
@@ -49,8 +49,8 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add Live/Customers/Sales.twb
-          git commit -m "Auto-sync: Update Sales.twb in Customers from Live" || exit 0
+          git add Live/Customers/Sales.twbx
+          git commit -m "Auto-sync: Update Sales.twbx in Customers from Live" || exit 0
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git push origin HEAD:${{ github.event.pull_request.head.ref }}
           else
@@ -65,5 +65,5 @@ jobs:
           body: |
             🔄 **Auto-sync completed**
             
-            The file `Live/Customers/Sales.twb` has been automatically updated to match `Live/Sales.twb`.
+            The file `Live/Customers/Sales.twbx` has been automatically updated to match `Live/Sales.twbx`.
 

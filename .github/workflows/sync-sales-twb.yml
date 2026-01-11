@@ -24,6 +24,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,7 +51,11 @@ jobs:
           git config --local user.name "GitHub Action"
           git add Live/Customers/Sales.twb
           git commit -m "Auto-sync: Update Sales.twb in Customers from Live" || exit 0
-          git push
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          else
+            git push
+          fi
 
       - name: Update Pull Request
         if: github.event_name == 'pull_request' && steps.verify-changed-files.outputs.changed == 'true'

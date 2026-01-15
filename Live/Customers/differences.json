@@ -1,0 +1,20 @@
+{
+  "Sales.twbx": {
+    "description": "Differences between main Sales.twbx and customer Sales.twbx",
+    "xml_changes": {
+      "Sales.twb": {
+        "xpath_modifications": [
+          {
+            "action": "change_attribute",
+            "tag": "format",
+            "attribute": "value",
+            "old_value": "#4e79a7",
+            "new_value": "#custom_color_1",
+            "attr_filter": {}
+          }
+        ]
+      }
+    }
+  }
+}
+

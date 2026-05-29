@@ -8,8 +8,8 @@
             "action": "change_attribute",
             "tag": "format",
             "attribute": "value",
-            "old_value": "#4e79a7",
-            "new_value": "#custom_color_1",
+            "old_value": "#1b1b1b",
+            "new_value": "#customer_dark",
             "attr_filter": {}
           }
         ]
@@ -17,4 +17,3 @@
     }
   }
 }
-

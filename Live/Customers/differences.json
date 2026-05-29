@@ -10,7 +10,43 @@
             "attribute": "value",
             "old_value": "#1b1b1b",
             "new_value": "#customer_dark",
-            "attr_filter": {}
+            "attr_filter": {
+              "attr": "mark-color"
+            },
+            "element_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/panes[1]/pane[@id='19']/style[1]/style-rule[1]/format[@attr='mark-color']"
+          },
+          {
+            "action": "change_attribute",
+            "tag": "format",
+            "attribute": "value",
+            "old_value": "#1b1b1b",
+            "new_value": "#customer_dark",
+            "attr_filter": {
+              "attr": "mark-color"
+            },
+            "element_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/panes[1]/pane[@id='20']/style[1]/style-rule[1]/format[@attr='mark-color']"
+          },
+          {
+            "action": "change_attribute",
+            "tag": "format",
+            "attribute": "value",
+            "old_value": "#1b1b1b",
+            "new_value": "#customer_dark",
+            "attr_filter": {
+              "attr": "mark-color"
+            },
+            "element_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/panes[1]/pane[@id='23']/style[1]/style-rule[1]/format[@attr='mark-color']"
+          },
+          {
+            "action": "change_attribute",
+            "tag": "format",
+            "attribute": "value",
+            "old_value": "#1b1b1b",
+            "new_value": "#customer_dark",
+            "attr_filter": {
+              "attr": "mark-color"
+            },
+            "element_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/panes[1]/pane[@id='24']/style[1]/style-rule[1]/format[@attr='mark-color']"
           }
         ]
       }

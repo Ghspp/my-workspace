@@ -17,12 +17,16 @@ import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIVE_DIR = REPO_ROOT / "Live"
 CUSTOMERS_DIR = LIVE_DIR / "Customers"
 DIFFERENCES_FILE = "differences.json"
+
+# Attributes checked (in priority order) to build a stable identity key for an element.
+# Elements with these attributes can be matched by value across file versions.
+_KEY_ATTRS = ("name", "column", "attr", "id", "param", "caption")
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +51,7 @@ def extract_twb(twbx_path: Path, dest_dir: Path) -> Path:
         z.extractall(dest_dir)
     twb_files = list(dest_dir.rglob("*.twb"))
     if not twb_files:
-        raise FileNotFoundError(f"No .twb file found inside {twbx_path}")
+        raise FileNotFoundError("No .twb file found inside " + str(twbx_path))
     return twb_files[0]
 
 
@@ -74,7 +78,12 @@ def generate_diff() -> None:
     all_diffs: Dict = {}
 
     for main_path, customer_path in pairs:
-        print(f"Comparing: {main_path.relative_to(REPO_ROOT)}  vs  {customer_path.relative_to(REPO_ROOT)}")
+        print(
+            "Comparing: "
+            + str(main_path.relative_to(REPO_ROOT))
+            + "  vs  "
+            + str(customer_path.relative_to(REPO_ROOT))
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -89,11 +98,23 @@ def generate_diff() -> None:
             cust_tree = ET.parse(cust_twb)
 
             modifications = _diff_trees(main_tree, cust_tree)
-            print(f"  -> {len(modifications)} modification(s) found.")
+
+            attr_changes = sum(1 for m in modifications if m["action"] == "change_attribute")
+            adds = sum(1 for m in modifications if m["action"] == "add_element")
+            removes = sum(1 for m in modifications if m["action"] == "remove_element")
+            print(
+                "  -> "
+                + str(attr_changes) + " attribute change(s), "
+                + str(adds) + " element addition(s), "
+                + str(removes) + " element removal(s)."
+            )
 
             all_diffs[main_path.name] = {
                 "description": (
-                    f"Differences between main {main_path.name} and customer {customer_path.name}"
+                    "Differences between main "
+                    + main_path.name
+                    + " and customer "
+                    + customer_path.name
                 ),
                 "xml_changes": {
                     twb_filename: {
@@ -104,67 +125,187 @@ def generate_diff() -> None:
 
     out_path = CUSTOMERS_DIR / DIFFERENCES_FILE
     out_path.write_text(json.dumps(all_diffs, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"Saved {out_path.relative_to(REPO_ROOT)}")
+    print("Saved " + str(out_path.relative_to(REPO_ROOT)))
+
+
+# ---------------------------------------------------------------------------
+# XML diffing helpers
+# ---------------------------------------------------------------------------
+
+def _get_key(elem: ET.Element) -> Optional[Tuple[str, str]]:
+    """Return (attr_name, attr_value) that identifies this element, or None."""
+    for attr in _KEY_ATTRS:
+        if attr in elem.attrib:
+            return (attr, elem.attrib[attr])
+    return None
+
+
+def _make_selector(elem: ET.Element) -> str:
+    """Return an XPath selector string for this element: tag[@key="val"] or just tag."""
+    key = _get_key(elem)
+    if key:
+        attr_name, attr_val = key
+        # Use single quotes inside to avoid escaping issues
+        safe_val = attr_val.replace("'", "\\'")
+        return elem.tag + "[@" + attr_name + "='" + safe_val + "']"
+    return elem.tag
 
 
 def _diff_trees(main_tree: ET.ElementTree, cust_tree: ET.ElementTree) -> List[Dict]:
-    """Walk both XML trees and return a list of change_attribute modifications.
+    """Recursively diff two XML trees.
 
-    Strategy: collect every (tag, attr) → set-of-values from each tree, then
-    record 1-to-1 value replacements.  Many-to-many differences are also
-    recorded as individual pairs (best-effort).
+    Returns a list of modifications, each being one of:
+      - change_attribute: an element attribute differs between main and customer
+      - add_element:      an element exists in customer but not in main
+      - remove_element:   an element exists in main but not in customer
     """
-    def collect(tree: ET.ElementTree) -> Dict:
-        data: Dict = {}
-        for elem in tree.iter():
-            for attr, val in elem.attrib.items():
-                data.setdefault((elem.tag, attr), set()).add(val)
-        return data
-
-    main_attrs = collect(main_tree)
-    cust_attrs = collect(cust_tree)
-
-    modifications: List = []
-    seen: Set = set()
-
-    for (tag, attr), cust_vals in cust_attrs.items():
-        main_vals = main_attrs.get((tag, attr), set())
-        added = cust_vals - main_vals    # values present in customer but not main
-        removed = main_vals - cust_vals  # values present in main but not customer
-
-        if not added or not removed:
-            continue
-
-        if len(added) == 1 and len(removed) == 1:
-            old_v = next(iter(removed))
-            new_v = next(iter(added))
-            key = (tag, attr, old_v, new_v)
-            if key not in seen:
-                seen.add(key)
-                modifications.append({
-                    "action": "change_attribute",
-                    "tag": tag,
-                    "attribute": attr,
-                    "old_value": old_v,
-                    "new_value": new_v,
-                    "attr_filter": {},
-                })
-        else:
-            for old_v in sorted(removed):
-                for new_v in sorted(added):
-                    key = (tag, attr, old_v, new_v)
-                    if key not in seen:
-                        seen.add(key)
-                        modifications.append({
-                            "action": "change_attribute",
-                            "tag": tag,
-                            "attribute": attr,
-                            "old_value": old_v,
-                            "new_value": new_v,
-                            "attr_filter": {},
-                        })
-
+    modifications: List[Dict] = []
+    seen_attr_changes: Set[FrozenSet] = set()
+    main_root = main_tree.getroot()
+    cust_root = cust_tree.getroot()
+    _diff_children(main_root, cust_root, ".", modifications, seen_attr_changes)
     return modifications
+
+
+def _diff_attrs(
+    main_elem: ET.Element,
+    cust_elem: ET.Element,
+    modifications: List[Dict],
+    seen: Set[FrozenSet],
+    element_xpath: str = "",
+) -> None:
+    """Detect attribute-level differences between two aligned elements and append modifications.
+
+    element_xpath: full XPath to this element from the root (used for precise targeting).
+    When provided, the modification targets only this exact element instead of all matching
+    elements across the document.
+    """
+    key = _get_key(main_elem)
+    attr_filter = {key[0]: key[1]} if key else {}
+
+    for attr, main_val in main_elem.attrib.items():
+        cust_val = cust_elem.attrib.get(attr)
+        if cust_val is not None and cust_val != main_val:
+            dedup_key = frozenset([
+                ("tag", main_elem.tag),
+                ("attribute", attr),
+                ("old_value", main_val),
+                ("new_value", cust_val),
+                ("filter", str(sorted(attr_filter.items()))),
+                ("xpath", element_xpath),
+            ])
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                mod: Dict = {
+                    "action": "change_attribute",
+                    "tag": main_elem.tag,
+                    "attribute": attr,
+                    "old_value": main_val,
+                    "new_value": cust_val,
+                    "attr_filter": attr_filter,
+                }
+                if element_xpath:
+                    mod["element_xpath"] = element_xpath
+                modifications.append(mod)
+
+
+def _diff_children(
+    main_elem: ET.Element,
+    cust_elem: ET.Element,
+    parent_xpath: str,
+    modifications: List[Dict],
+    seen: Set[FrozenSet],
+) -> None:
+    """Align children of two matched elements, recurse, and record structural differences."""
+    # Group children by tag
+    def _group(elem: ET.Element) -> Dict:
+        by_tag: Dict = {}
+        for child in elem:
+            by_tag.setdefault(child.tag, []).append(child)
+        return by_tag
+
+    main_by_tag = _group(main_elem)
+    cust_by_tag = _group(cust_elem)
+    all_tags = set(main_by_tag) | set(cust_by_tag)
+
+    for tag in sorted(all_tags):
+        main_list = main_by_tag.get(tag, [])
+        cust_list = cust_by_tag.get(tag, [])
+
+        # Partition into keyed (matched by identity attr) and positional (matched by index)
+        main_keyed: Dict[Tuple[str, str], ET.Element] = {}
+        main_positional: List[ET.Element] = []
+        for elem in main_list:
+            k = _get_key(elem)
+            if k:
+                main_keyed[k] = elem
+            else:
+                main_positional.append(elem)
+
+        cust_keyed: Dict[Tuple[str, str], ET.Element] = {}
+        cust_positional: List[ET.Element] = []
+        for elem in cust_list:
+            k = _get_key(elem)
+            if k:
+                cust_keyed[k] = elem
+            else:
+                cust_positional.append(elem)
+
+        # --- Keyed elements ---
+        all_keys = set(main_keyed) | set(cust_keyed)
+        for k in sorted(all_keys):
+            main_child = main_keyed.get(k)
+            cust_child = cust_keyed.get(k)
+            attr_name, attr_val = k
+            safe_val = attr_val.replace("'", "\\'")
+            child_xpath = parent_xpath + "/" + tag + "[@" + attr_name + "='" + safe_val + "']"
+
+            if main_child is None and cust_child is not None:
+                # Element added in customer version
+                modifications.append({
+                    "action": "add_element",
+                    "parent_xpath": parent_xpath,
+                    "xml": ET.tostring(cust_child, encoding="unicode"),
+                })
+            elif main_child is not None and cust_child is None:
+                # Element removed in customer version
+                modifications.append({
+                    "action": "remove_element",
+                    "parent_xpath": parent_xpath,
+                    "element_tag": tag,
+                    "element_key_attr": attr_name,
+                    "element_key_value": attr_val,
+                })
+            else:
+                # Both have this element — compare attrs then recurse
+                _diff_attrs(main_child, cust_child, modifications, seen, child_xpath)
+                _diff_children(main_child, cust_child, child_xpath, modifications, seen)
+
+        # --- Positional elements (no identity key) ---
+        min_len = min(len(main_positional), len(cust_positional))
+
+        # Matched positional elements
+        for i in range(min_len):
+            child_xpath = parent_xpath + "/" + tag + "[" + str(i + 1) + "]"
+            _diff_attrs(main_positional[i], cust_positional[i], modifications, seen, child_xpath)
+            _diff_children(main_positional[i], cust_positional[i], child_xpath, modifications, seen)
+
+        # Extra positional elements in customer (added)
+        for i in range(min_len, len(cust_positional)):
+            modifications.append({
+                "action": "add_element",
+                "parent_xpath": parent_xpath,
+                "xml": ET.tostring(cust_positional[i], encoding="unicode"),
+            })
+
+        # Extra positional elements in main (removed in customer)
+        for i in range(min_len, len(main_positional)):
+            modifications.append({
+                "action": "remove_element",
+                "parent_xpath": parent_xpath,
+                "element_tag": tag,
+                "element_attrs": dict(main_positional[i].attrib),
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +320,7 @@ def apply_diff(twbx_name: Optional[str] = None) -> None:
     """
     diff_file = CUSTOMERS_DIR / DIFFERENCES_FILE
     if not diff_file.exists():
-        print(f"differences.json not found at {diff_file}", file=sys.stderr)
+        print("differences.json not found at " + str(diff_file), file=sys.stderr)
         sys.exit(1)
 
     all_diffs: Dict = json.loads(diff_file.read_text(encoding="utf-8"))
@@ -192,10 +333,13 @@ def apply_diff(twbx_name: Optional[str] = None) -> None:
         customer_path = CUSTOMERS_DIR / twbx_file_name
 
         if not main_path.exists():
-            print(f"Main file not found: {main_path.relative_to(REPO_ROOT)}", file=sys.stderr)
+            print(
+                "Main file not found: " + str(main_path.relative_to(REPO_ROOT)),
+                file=sys.stderr,
+            )
             continue
 
-        print(f"Applying diff -> {customer_path.relative_to(REPO_ROOT)}")
+        print("Applying diff -> " + str(customer_path.relative_to(REPO_ROOT)))
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -203,8 +347,6 @@ def apply_diff(twbx_name: Optional[str] = None) -> None:
             output_dir = tmp_dir / "output"
 
             main_twb = extract_twb(main_path, main_extract)
-
-            # Start from a copy of the main extraction
             shutil.copytree(str(main_extract), str(output_dir))
             output_twb = output_dir / main_twb.relative_to(main_extract)
 
@@ -215,52 +357,127 @@ def apply_diff(twbx_name: Optional[str] = None) -> None:
                 if modifications:
                     tree = ET.parse(output_twb)
                     applied = _apply_modifications(tree, modifications)
-                    tree.write(
-                        str(output_twb),
-                        encoding="unicode",
-                        xml_declaration=False,
-                    )
+                    tree.write(str(output_twb), encoding="unicode", xml_declaration=False)
                     total_mods += applied
 
             repack_twbx(output_dir, customer_path)
-            print(f"  Applied {total_mods} modification(s) -> saved {customer_path.name}")
+            print("  Applied " + str(total_mods) + " modification(s) -> saved " + customer_path.name)
 
 
-def _apply_modifications(tree: ET.ElementTree, modifications: list) -> int:
-    """Apply xpath_modifications to tree in-place. Returns number of element changes made."""
+def _find_parent(root: ET.Element, parent_xpath: str) -> Optional[ET.Element]:
+    """Locate the parent element by XPath. '.' means root itself."""
+    if parent_xpath == ".":
+        return root
+    return root.find(parent_xpath)
+
+
+def _apply_modifications(tree: ET.ElementTree, modifications: List[Dict]) -> int:
+    """Apply xpath_modifications to tree in-place. Returns number of changes made."""
     root = tree.getroot()
     change_count = 0
 
     for mod in modifications:
         action = mod.get("action")
-        tag = mod["tag"]
-        attr_filter: dict = mod.get("attr_filter", {})
 
+        # ------------------------------------------------------------------
+        # change_attribute
+        # ------------------------------------------------------------------
         if action == "change_attribute":
+            tag = mod["tag"]
             attribute = mod["attribute"]
             old_value = mod["old_value"]
             new_value = mod["new_value"]
-            for elem in root.iter(tag):
-                if all(elem.attrib.get(k) == v for k, v in attr_filter.items()):
-                    if elem.attrib.get(attribute) == old_value:
-                        elem.set(attribute, new_value)
-                        change_count += 1
+            attr_filter: Dict = mod.get("attr_filter", {})
+            element_xpath = mod.get("element_xpath", "")
 
+            if element_xpath:
+                # Precise mode: target exactly one element by its full XPath
+                target = root.find(element_xpath)
+                if target is not None and target.attrib.get(attribute) == old_value:
+                    target.set(attribute, new_value)
+                    change_count += 1
+            else:
+                # Legacy / global mode: change all matching elements
+                for elem in root.iter(tag):
+                    if all(elem.attrib.get(k) == v for k, v in attr_filter.items()):
+                        if elem.attrib.get(attribute) == old_value:
+                            elem.set(attribute, new_value)
+                            change_count += 1
+
+        # ------------------------------------------------------------------
+        # set_attribute  (unconditional set, no old_value check)
+        # ------------------------------------------------------------------
         elif action == "set_attribute":
+            tag = mod["tag"]
             attribute = mod["attribute"]
             new_value = mod["new_value"]
+            attr_filter = mod.get("attr_filter", {})
             for elem in root.iter(tag):
                 if all(elem.attrib.get(k) == v for k, v in attr_filter.items()):
                     elem.set(attribute, new_value)
                     change_count += 1
 
+        # ------------------------------------------------------------------
+        # delete_attribute
+        # ------------------------------------------------------------------
         elif action == "delete_attribute":
+            tag = mod["tag"]
             attribute = mod["attribute"]
+            attr_filter = mod.get("attr_filter", {})
             for elem in root.iter(tag):
                 if all(elem.attrib.get(k) == v for k, v in attr_filter.items()):
                     if attribute in elem.attrib:
                         del elem.attrib[attribute]
                         change_count += 1
+
+        # ------------------------------------------------------------------
+        # add_element  — append serialised XML child to a parent
+        # ------------------------------------------------------------------
+        elif action == "add_element":
+            parent_xpath = mod.get("parent_xpath", ".")
+            xml_str = mod.get("xml", "")
+            parent = _find_parent(root, parent_xpath)
+            if parent is None:
+                print(
+                    "  WARNING: parent not found for add_element: " + parent_xpath,
+                    file=sys.stderr,
+                )
+                continue
+            try:
+                new_elem = ET.fromstring(xml_str)
+                parent.append(new_elem)
+                change_count += 1
+            except ET.ParseError as exc:
+                print("  WARNING: could not parse add_element xml: " + str(exc), file=sys.stderr)
+
+        # ------------------------------------------------------------------
+        # remove_element  — remove a child element identified by key attr or full attrs
+        # ------------------------------------------------------------------
+        elif action == "remove_element":
+            parent_xpath = mod.get("parent_xpath", ".")
+            element_tag = mod.get("element_tag", "")
+            parent = _find_parent(root, parent_xpath)
+            if parent is None:
+                print(
+                    "  WARNING: parent not found for remove_element: " + parent_xpath,
+                    file=sys.stderr,
+                )
+                continue
+
+            for child in list(parent):
+                if child.tag != element_tag:
+                    continue
+                if "element_key_attr" in mod:
+                    if child.get(mod["element_key_attr"]) == mod["element_key_value"]:
+                        parent.remove(child)
+                        change_count += 1
+                        break
+                else:
+                    elem_attrs: Dict = mod.get("element_attrs", {})
+                    if all(child.get(k) == v for k, v in elem_attrs.items()):
+                        parent.remove(child)
+                        change_count += 1
+                        break
 
     return change_count
 
@@ -278,12 +495,12 @@ def pre_commit() -> None:
         text=True,
     )
     if result.returncode != 0:
-        print(f"git diff failed: {result.stderr}", file=sys.stderr)
+        print("git diff failed: " + result.stderr, file=sys.stderr)
         sys.exit(1)
 
     staged_files = result.stdout.strip().splitlines()
 
-    # Only files directly in Live/ (not in any sub-directory like Live/Customers/)
+    # Only files directly in Live/ (not in sub-directories like Live/Customers/)
     main_staged = [
         f for f in staged_files
         if f.startswith("Live/") and f.endswith(".twbx") and f.count("/") == 1
@@ -303,13 +520,13 @@ def pre_commit() -> None:
     for staged_path in main_staged:
         twbx_name = Path(staged_path).name
         if twbx_name not in all_diffs:
-            print(f"No diff entry for {twbx_name}; skipping.", file=sys.stderr)
+            print("No diff entry for " + twbx_name + "; skipping.", file=sys.stderr)
             continue
 
-        print(f"Syncing {twbx_name} -> Live/Customers/{twbx_name} ...")
+        print("Syncing " + twbx_name + " -> Live/Customers/" + twbx_name + " ...")
         apply_diff(twbx_name)
 
-        customer_rel = f"Live/Customers/{twbx_name}"
+        customer_rel = "Live/Customers/" + twbx_name
         add_result = subprocess.run(
             ["git", "add", customer_rel],
             cwd=REPO_ROOT,
@@ -317,9 +534,9 @@ def pre_commit() -> None:
             text=True,
         )
         if add_result.returncode != 0:
-            print(f"git add failed: {add_result.stderr}", file=sys.stderr)
+            print("git add failed: " + add_result.stderr, file=sys.stderr)
             sys.exit(1)
-        print(f"  Staged {customer_rel}")
+        print("  Staged " + customer_rel)
         any_synced = True
 
     if any_synced:
@@ -333,7 +550,7 @@ def pre_commit() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tableau .twbx sync — generate-diff / apply-diff / pre-commit"
+        description="Tableau .twbx sync -- generate-diff / apply-diff / pre-commit"
     )
     parser.add_argument(
         "command",

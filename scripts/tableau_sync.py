@@ -2,11 +2,9 @@
 """tableau_sync.py - Synchronise Tableau .twbx files between main (Live/) and customer (Live/Customers/) versions.
 
 Usage:
-    python scripts/tableau_sync.py generate-diff              # Snapshot customer differences -> differences.json
-    python scripts/tableau_sync.py apply-diff                 # Rebuild customer from main + differences.json
+    python scripts/tableau_sync.py generate-diff              # Diff main vs customer -> write contract.json
+    python scripts/tableau_sync.py apply-diff                 # Rebuild customer = copy(main) + contract
     python scripts/tableau_sync.py apply-diff --file X.twbx   # Process one specific file
-    python scripts/tableau_sync.py propagate                  # Propagate main changes to customer (default hook mode)
-    python scripts/tableau_sync.py propagate --file X.twbx    # Propagate for one specific file
     python scripts/tableau_sync.py repair                     # Remove duplicate layout elements from customer files
     python scripts/tableau_sync.py repair --file X.twbx       # Repair one specific customer file
     python scripts/tableau_sync.py pre-commit                 # Called automatically by git pre-commit hook
@@ -26,7 +24,7 @@ from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIVE_DIR = REPO_ROOT / "Live"
 CUSTOMERS_DIR = LIVE_DIR / "Customers"
-DIFFERENCES_FILE = "differences.json"
+DIFFERENCES_FILE = "contract.json"
 
 # Attributes checked (in priority order) to build a stable identity key for an element.
 # Elements with these attributes can be matched by value across file versions.
@@ -91,7 +89,7 @@ def repack_twbx(source_dir: Path, output_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_diff() -> None:
-    """Compare each main .twbx with its customer counterpart and write differences.json."""
+    """Compare each main .twbx with its customer counterpart and write contract.json."""
     pairs = find_twbx_pairs()
     if not pairs:
         print("No matching .twbx pairs found in Live/ and Live/Customers/.", file=sys.stderr)
@@ -120,6 +118,10 @@ def generate_diff() -> None:
             cust_tree = ET.parse(cust_twb)
 
             modifications = _diff_trees(main_tree, cust_tree)
+
+            # Strip ephemeral Tableau layout elements (zone/pane/window IDs are
+            # regenerated on every save and must never be stored in the contract).
+            modifications = [m for m in modifications if not _is_layout_structural(m)]
 
             attr_changes = sum(1 for m in modifications if m["action"] == "change_attribute")
             adds = sum(1 for m in modifications if m["action"] == "add_element")
@@ -335,33 +337,37 @@ def _diff_children(
 # ---------------------------------------------------------------------------
 
 def apply_diff(twbx_name: Optional[str] = None) -> None:
-    """Read differences.json and regenerate customer .twbx file(s) from main + delta.
+    """Rebuild each customer .twbx as: copy of Main + contract.json modifications.
+
+    For every matching main/customer pair (or just the one named by twbx_name):
+      1. Copy Main into a temp directory.
+      2. Look up this file's entry in contract.json (empty list if absent or no entry).
+      3. Apply the contract modifications to the copy.
+      4. Write the result to the customer path.
+
+    contract.json is optional — if it does not exist the customer becomes a plain
+    copy of Main.
 
     Args:
-        twbx_name: If given, process only this filename; otherwise process all entries.
+        twbx_name: If given, process only this filename; otherwise process all pairs.
     """
-    diff_file = CUSTOMERS_DIR / DIFFERENCES_FILE
-    if not diff_file.exists():
-        print("differences.json not found at " + str(diff_file), file=sys.stderr)
+    pairs = find_twbx_pairs()
+    if not pairs:
+        print("No matching .twbx pairs found in Live/ and Live/Customers/.", file=sys.stderr)
         sys.exit(1)
 
-    all_diffs: Dict = json.loads(diff_file.read_text(encoding="utf-8"))
+    # Load contract (tolerates missing file).
+    contract_path = CUSTOMERS_DIR / DIFFERENCES_FILE
+    contract: Dict = {}
+    if contract_path.exists():
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
 
-    for twbx_file_name, diff_data in all_diffs.items():
-        if twbx_name and twbx_file_name != twbx_name:
+    any_processed = False
+    for main_path, customer_path in pairs:
+        if twbx_name and main_path.name != twbx_name:
             continue
 
-        main_path = LIVE_DIR / twbx_file_name
-        customer_path = CUSTOMERS_DIR / twbx_file_name
-
-        if not main_path.exists():
-            print(
-                "Main file not found: " + str(main_path.relative_to(REPO_ROOT)),
-                file=sys.stderr,
-            )
-            continue
-
-        print("Applying diff -> " + str(customer_path.relative_to(REPO_ROOT)))
+        print("Rebuilding: " + str(customer_path.relative_to(REPO_ROOT)))
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -372,7 +378,9 @@ def apply_diff(twbx_name: Optional[str] = None) -> None:
             shutil.copytree(str(main_extract), str(output_dir))
             output_twb = output_dir / main_twb.relative_to(main_extract)
 
-            xml_changes = diff_data.get("xml_changes", {})
+            # Retrieve modifications from contract (may be absent = no customisations).
+            file_contract = contract.get(main_path.name, {})
+            xml_changes = file_contract.get("xml_changes", {})
             total_mods = 0
             for _twb_file, change_data in xml_changes.items():
                 modifications = change_data.get("xpath_modifications", [])
@@ -384,6 +392,10 @@ def apply_diff(twbx_name: Optional[str] = None) -> None:
 
             repack_twbx(output_dir, customer_path)
             print("  Applied " + str(total_mods) + " modification(s) -> saved " + customer_path.name)
+        any_processed = True
+
+    if not any_processed and twbx_name:
+        print("File not found in pairs: " + twbx_name, file=sys.stderr)
 
 
 def _find_parent(root: ET.Element, parent_xpath: str) -> Optional[ET.Element]:
@@ -684,7 +696,7 @@ def propagate(twbx_name: Optional[str] = None) -> None:
 # ---------------------------------------------------------------------------
 
 def pre_commit() -> None:
-    """Git pre-commit hook: propagate changes from staged main .twbx files to Live/Customers/."""
+    """Git pre-commit hook: rebuild each staged customer .twbx as copy(main) + contract."""
     result = subprocess.run(
         ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"],
         cwd=REPO_ROOT,
@@ -715,7 +727,7 @@ def pre_commit() -> None:
             print("Customer file not found for " + twbx_name + "; skipping.", file=sys.stderr)
             continue
 
-        propagate(twbx_name)
+        apply_diff(twbx_name)
 
         customer_rel = "Live/Customers/" + twbx_name
         add_result = subprocess.run(
@@ -795,16 +807,16 @@ def repair(twbx_name: Optional[str] = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tableau .twbx sync -- generate-diff / apply-diff / propagate / repair / pre-commit"
+        description="Tableau .twbx sync -- generate-diff / apply-diff / repair / pre-commit"
     )
     parser.add_argument(
         "command",
-        choices=["generate-diff", "apply-diff", "propagate", "repair", "pre-commit"],
+        choices=["generate-diff", "apply-diff", "repair", "pre-commit"],
     )
     parser.add_argument(
         "--file",
         metavar="NAME.twbx",
-        help="Process a single .twbx file by name (apply-diff / propagate / repair only)",
+        help="Process a single .twbx file by name (apply-diff / repair only)",
     )
     args = parser.parse_args()
 
@@ -812,8 +824,6 @@ def main() -> None:
         generate_diff()
     elif args.command == "apply-diff":
         apply_diff(args.file)
-    elif args.command == "propagate":
-        propagate(args.file)
     elif args.command == "repair":
         repair(args.file)
     elif args.command == "pre-commit":

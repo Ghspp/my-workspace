@@ -7,6 +7,8 @@ Usage:
     python scripts/tableau_sync.py apply-diff --file X.twbx   # Process one specific file
     python scripts/tableau_sync.py propagate                  # Propagate main changes to customer (default hook mode)
     python scripts/tableau_sync.py propagate --file X.twbx    # Propagate for one specific file
+    python scripts/tableau_sync.py repair                     # Remove duplicate layout elements from customer files
+    python scripts/tableau_sync.py repair --file X.twbx       # Repair one specific customer file
     python scripts/tableau_sync.py pre-commit                 # Called automatically by git pre-commit hook
 """
 
@@ -29,6 +31,11 @@ DIFFERENCES_FILE = "differences.json"
 # Attributes checked (in priority order) to build a stable identity key for an element.
 # Elements with these attributes can be matched by value across file versions.
 _KEY_ATTRS = ("name", "column", "attr", "id", "param", "caption")
+
+# Tableau internal layout tags whose IDs are regenerated on every save.
+# Structural add/remove of these elements must never be propagated — doing so
+# duplicates elements that already exist in the customer file.
+_TABLEAU_LAYOUT_TAGS = frozenset({"zone", "pane", "window", "point", "size"})
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +467,14 @@ def _apply_modifications(tree: ET.ElementTree, modifications: List[Dict]) -> int
                 continue
             try:
                 new_elem = ET.fromstring(xml_str)
+                # Skip if an element with the same identity key already exists in parent.
+                # This prevents duplicates when the same element was added by a prior propagation.
+                key = _get_key(new_elem)
+                if key:
+                    attr_name, attr_val = key
+                    safe_val = attr_val.replace("'", "\\'")
+                    if parent.find(new_elem.tag + "[@" + attr_name + "='" + safe_val + "']") is not None:
+                        continue
                 parent.append(new_elem)
                 change_count += 1
             except ET.ParseError as exc:
@@ -500,6 +515,23 @@ def _apply_modifications(tree: ET.ElementTree, modifications: List[Dict]) -> int
 # ---------------------------------------------------------------------------
 # propagate — apply delta(old Main → new Main) to Customer in-place
 # ---------------------------------------------------------------------------
+
+def _is_layout_structural(change: Dict) -> bool:
+    """Return True if this change is a structural add/remove of a Tableau layout element.
+
+    Tableau regenerates zone/pane/window IDs on every save, so propagating
+    these structural changes would duplicate elements that already exist in
+    the customer file with the new IDs.
+    """
+    if change["action"] not in ("add_element", "remove_element"):
+        return False
+    if change.get("element_tag", "") in _TABLEAU_LAYOUT_TAGS:
+        return True
+    xml = change.get("xml", "").strip()
+    return any(
+        xml.startswith("<" + t + " ") or xml.startswith("<" + t + ">")
+        for t in _TABLEAU_LAYOUT_TAGS
+    )
 
 def _apply_changes_to_customer(customer_path: Path, changes: List[Dict]) -> int:
     """Apply a list of xpath_modifications to an existing customer .twbx in-place.
@@ -619,6 +651,11 @@ def propagate(twbx_name: Optional[str] = None) -> None:
             "zone_adds_sample": [c.get("xml","")[:120] for c in zone_adds[:3]],
         }, "H1-H2-H3-H5")
 
+        # Filter out layout-structural changes. Tableau regenerates zone/pane IDs on
+        # every save, so add_element/remove_element for those tags would duplicate
+        # elements that already exist in Customer.
+        changes = [c for c in changes if not _is_layout_structural(c)]
+
         if not changes:
             print("  No changes detected; Customer is already up to date.")
             any_processed = True
@@ -699,21 +736,75 @@ def pre_commit() -> None:
 
 
 # ---------------------------------------------------------------------------
+# repair — remove duplicate layout elements from customer files
+# ---------------------------------------------------------------------------
+
+def repair(twbx_name: Optional[str] = None) -> None:
+    """Remove duplicate zone/pane/window elements from customer .twbx files.
+
+    Previous propagation runs may have added duplicate layout elements.
+    This command finds every <zones> / <panes> parent and removes later
+    duplicate children that share an id attribute with an earlier sibling.
+
+    Args:
+        twbx_name: If given, repair only this customer file; otherwise all.
+    """
+    pairs = find_twbx_pairs()
+    if not pairs:
+        print("No matching .twbx pairs found.", file=sys.stderr)
+        sys.exit(1)
+
+    for main_path, customer_path in pairs:
+        if twbx_name and main_path.name != twbx_name:
+            continue
+
+        print("Repairing: " + str(customer_path.relative_to(REPO_ROOT)))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            cust_extract = tmp_dir / "cust"
+            cust_twb = extract_twb(customer_path, cust_extract)
+
+            tree = ET.parse(cust_twb)
+            root = tree.getroot()
+            removed = 0
+
+            for parent in root.iter():
+                seen_ids: Dict[str, ET.Element] = {}
+                for child in list(parent):
+                    if child.tag not in _TABLEAU_LAYOUT_TAGS:
+                        continue
+                    child_id = child.get("id")
+                    if child_id is None:
+                        continue
+                    key = child.tag + ":" + child_id
+                    if key in seen_ids:
+                        parent.remove(child)
+                        removed += 1
+                    else:
+                        seen_ids[key] = child
+
+            tree.write(str(cust_twb), encoding="unicode", xml_declaration=False)
+            repack_twbx(cust_extract, customer_path)
+            print("  Removed " + str(removed) + " duplicate layout element(s) -> saved " + customer_path.name)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tableau .twbx sync -- generate-diff / apply-diff / propagate / pre-commit"
+        description="Tableau .twbx sync -- generate-diff / apply-diff / propagate / repair / pre-commit"
     )
     parser.add_argument(
         "command",
-        choices=["generate-diff", "apply-diff", "propagate", "pre-commit"],
+        choices=["generate-diff", "apply-diff", "propagate", "repair", "pre-commit"],
     )
     parser.add_argument(
         "--file",
         metavar="NAME.twbx",
-        help="Process a single .twbx file by name (apply-diff / propagate only)",
+        help="Process a single .twbx file by name (apply-diff / propagate / repair only)",
     )
     args = parser.parse_args()
 
@@ -723,6 +814,8 @@ def main() -> None:
         apply_diff(args.file)
     elif args.command == "propagate":
         propagate(args.file)
+    elif args.command == "repair":
+        repair(args.file)
     elif args.command == "pre-commit":
         pre_commit()
 

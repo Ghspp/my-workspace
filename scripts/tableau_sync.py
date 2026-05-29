@@ -2,10 +2,12 @@
 """tableau_sync.py - Synchronise Tableau .twbx files between main (Live/) and customer (Live/Customers/) versions.
 
 Usage:
-    python scripts/tableau_sync.py generate-diff             # First time: create differences.json
-    python scripts/tableau_sync.py apply-diff                # Update customer file from main + delta
-    python scripts/tableau_sync.py apply-diff --file X.twbx  # Process one specific file
-    python scripts/tableau_sync.py pre-commit                # Called by git pre-commit hook
+    python scripts/tableau_sync.py generate-diff              # Snapshot customer differences -> differences.json
+    python scripts/tableau_sync.py apply-diff                 # Rebuild customer from main + differences.json
+    python scripts/tableau_sync.py apply-diff --file X.twbx   # Process one specific file
+    python scripts/tableau_sync.py propagate                  # Propagate main changes to customer (default hook mode)
+    python scripts/tableau_sync.py propagate --file X.twbx    # Propagate for one specific file
+    python scripts/tableau_sync.py pre-commit                 # Called automatically by git pre-commit hook
 """
 
 import argparse
@@ -52,6 +54,19 @@ def extract_twb(twbx_path: Path, dest_dir: Path) -> Path:
     twb_files = list(dest_dir.rglob("*.twb"))
     if not twb_files:
         raise FileNotFoundError("No .twb file found inside " + str(twbx_path))
+    return twb_files[0]
+
+
+def extract_twb_from_bytes(data: bytes, dest_dir: Path) -> Path:
+    """Extract the .twb XML file from raw twbx bytes (e.g. from git show) into dest_dir.
+    Returns the absolute path to the extracted .twb file."""
+    import io
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(data), "r") as z:
+        z.extractall(dest_dir)
+    twb_files = list(dest_dir.rglob("*.twb"))
+    if not twb_files:
+        raise FileNotFoundError("No .twb file found in git-retrieved twbx bytes")
     return twb_files[0]
 
 
@@ -483,11 +498,100 @@ def _apply_modifications(tree: ET.ElementTree, modifications: List[Dict]) -> int
 
 
 # ---------------------------------------------------------------------------
+# propagate — apply delta(old Main → new Main) to Customer in-place
+# ---------------------------------------------------------------------------
+
+def _apply_changes_to_customer(customer_path: Path, changes: List[Dict]) -> int:
+    """Apply a list of xpath_modifications to an existing customer .twbx in-place.
+
+    Unlike apply_diff (which rebuilds customer from main), this modifies the
+    customer file directly so that customer-specific elements (e.g. extra measures)
+    are preserved.  Returns the number of individual XML changes applied.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        cust_extract = tmp_dir / "cust"
+        cust_twb = extract_twb(customer_path, cust_extract)
+        tree = ET.parse(cust_twb)
+        applied = _apply_modifications(tree, changes)
+        tree.write(str(cust_twb), encoding="unicode", xml_declaration=False)
+        repack_twbx(cust_extract, customer_path)
+    return applied
+
+
+def propagate(twbx_name: Optional[str] = None) -> None:
+    """Propagate changes from Main to Customer by diffing old vs new Main.
+
+    For each .twbx pair:
+      1. Retrieve the previous committed version of Main from git HEAD.
+      2. Compute delta = _diff_trees(old Main, new Main).
+      3. Apply only those changes to Customer in-place, preserving anything
+         unique to Customer (extra measures, columns, custom panes, etc.).
+
+    Args:
+        twbx_name: If given, process only this filename; otherwise process all pairs.
+    """
+    pairs = find_twbx_pairs()
+    if not pairs:
+        print("No matching .twbx pairs found in Live/ and Live/Customers/.", file=sys.stderr)
+        sys.exit(1)
+
+    any_processed = False
+    for main_path, customer_path in pairs:
+        if twbx_name and main_path.name != twbx_name:
+            continue
+
+        git_path = "Live/" + main_path.name
+        old_result = subprocess.run(
+            ["git", "show", "HEAD:" + git_path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+
+        if old_result.returncode != 0 or not old_result.stdout:
+            print(
+                "No previous version of " + main_path.name + " in HEAD; skipping propagation.",
+                file=sys.stderr,
+            )
+            continue
+
+        print("Propagating: " + main_path.name + " -> " + customer_path.name + " ...")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            old_twb = extract_twb_from_bytes(old_result.stdout, tmp_dir / "old")
+            new_twb = extract_twb(main_path, tmp_dir / "new")
+            changes = _diff_trees(ET.parse(old_twb), ET.parse(new_twb))
+
+        if not changes:
+            print("  No changes detected; Customer is already up to date.")
+            any_processed = True
+            continue
+
+        attr_ch = sum(1 for c in changes if c["action"] == "change_attribute")
+        adds = sum(1 for c in changes if c["action"] == "add_element")
+        removes = sum(1 for c in changes if c["action"] == "remove_element")
+        print(
+            "  -> "
+            + str(attr_ch) + " attribute change(s), "
+            + str(adds) + " element addition(s), "
+            + str(removes) + " element removal(s)."
+        )
+
+        applied = _apply_changes_to_customer(customer_path, changes)
+        print("  Applied " + str(applied) + " modification(s) -> saved " + customer_path.name)
+        any_processed = True
+
+    if not any_processed and twbx_name:
+        print("File not found in pairs: " + twbx_name, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # pre-commit
 # ---------------------------------------------------------------------------
 
 def pre_commit() -> None:
-    """Git pre-commit hook: sync staged main .twbx files to Live/Customers/ and re-stage them."""
+    """Git pre-commit hook: propagate changes from staged main .twbx files to Live/Customers/."""
     result = subprocess.run(
         ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"],
         cwd=REPO_ROOT,
@@ -509,22 +613,16 @@ def pre_commit() -> None:
     if not main_staged:
         sys.exit(0)
 
-    diff_file = CUSTOMERS_DIR / DIFFERENCES_FILE
-    if not diff_file.exists():
-        print("No differences.json found; skipping Tableau sync.", file=sys.stderr)
-        sys.exit(0)
-
-    all_diffs: Dict = json.loads(diff_file.read_text(encoding="utf-8"))
-
     any_synced = False
     for staged_path in main_staged:
         twbx_name = Path(staged_path).name
-        if twbx_name not in all_diffs:
-            print("No diff entry for " + twbx_name + "; skipping.", file=sys.stderr)
+        customer_path = CUSTOMERS_DIR / twbx_name
+
+        if not customer_path.exists():
+            print("Customer file not found for " + twbx_name + "; skipping.", file=sys.stderr)
             continue
 
-        print("Syncing " + twbx_name + " -> Live/Customers/" + twbx_name + " ...")
-        apply_diff(twbx_name)
+        propagate(twbx_name)
 
         customer_rel = "Live/Customers/" + twbx_name
         add_result = subprocess.run(
@@ -550,16 +648,16 @@ def pre_commit() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tableau .twbx sync -- generate-diff / apply-diff / pre-commit"
+        description="Tableau .twbx sync -- generate-diff / apply-diff / propagate / pre-commit"
     )
     parser.add_argument(
         "command",
-        choices=["generate-diff", "apply-diff", "pre-commit"],
+        choices=["generate-diff", "apply-diff", "propagate", "pre-commit"],
     )
     parser.add_argument(
         "--file",
         metavar="NAME.twbx",
-        help="Process a single .twbx file by name (apply-diff only)",
+        help="Process a single .twbx file by name (apply-diff / propagate only)",
     )
     args = parser.parse_args()
 
@@ -567,6 +665,8 @@ def main() -> None:
         generate_diff()
     elif args.command == "apply-diff":
         apply_diff(args.file)
+    elif args.command == "propagate":
+        propagate(args.file)
     elif args.command == "pre-commit":
         pre_commit()
 

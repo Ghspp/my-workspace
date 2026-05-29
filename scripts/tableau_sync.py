@@ -508,13 +508,40 @@ def _apply_changes_to_customer(customer_path: Path, changes: List[Dict]) -> int:
     customer file directly so that customer-specific elements (e.g. extra measures)
     are preserved.  Returns the number of individual XML changes applied.
     """
+    # #region agent log
+    import json as _json, time as _time
+    _log_path = REPO_ROOT / "debug-ae1ef6.log"
+    def _dbg(msg, data, hyp=""):
+        with open(str(_log_path), "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps({"sessionId":"ae1ef6","timestamp":int(_time.time()*1000),"location":"tableau_sync.py:_apply_changes_to_customer","message":msg,"data":data,"hypothesisId":hyp}) + "\n")
+    # #endregion
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         cust_extract = tmp_dir / "cust"
         cust_twb = extract_twb(customer_path, cust_extract)
+
+        # #region agent log
+        import xml.etree.ElementTree as _ET2
+        _cust_tree_pre = _ET2.parse(str(cust_twb))
+        _cust_root_pre = _cust_tree_pre.getroot()
+        _zone_ids_before = [z.get("id") for z in _cust_root_pre.iter("zone")]
+        _pane_ids_before = [p.get("id") for p in _cust_root_pre.iter("pane")]
+        _dbg("customer_ids_before_apply", {"zone_ids": _zone_ids_before, "pane_ids": _pane_ids_before, "total_zones": len(_zone_ids_before), "changes_count": len(changes)}, "H1-H3")
+        # #endregion
+
         tree = ET.parse(cust_twb)
         applied = _apply_modifications(tree, changes)
         tree.write(str(cust_twb), encoding="unicode", xml_declaration=False)
+
+        # #region agent log
+        _cust_tree_post = _ET2.parse(str(cust_twb))
+        _cust_root_post = _cust_tree_post.getroot()
+        _zone_ids_after = [z.get("id") for z in _cust_root_post.iter("zone")]
+        _dup_zone_ids = [zid for zid in _zone_ids_after if _zone_ids_after.count(zid) > 1]
+        _dbg("customer_ids_after_apply", {"zone_ids": _zone_ids_after, "duplicate_zone_ids": list(set(_dup_zone_ids)), "total_zones": len(_zone_ids_after), "applied": applied}, "H1-H2")
+        # #endregion
+
         repack_twbx(cust_extract, customer_path)
     return applied
 
@@ -531,6 +558,14 @@ def propagate(twbx_name: Optional[str] = None) -> None:
     Args:
         twbx_name: If given, process only this filename; otherwise process all pairs.
     """
+    # #region agent log
+    import json as _json, time as _time
+    _log_path = REPO_ROOT / "debug-ae1ef6.log"
+    def _dbg(msg, data, hyp=""):
+        with open(str(_log_path), "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps({"sessionId":"ae1ef6","timestamp":int(_time.time()*1000),"location":"tableau_sync.py:propagate","message":msg,"data":data,"hypothesisId":hyp}) + "\n")
+    # #endregion
+
     pairs = find_twbx_pairs()
     if not pairs:
         print("No matching .twbx pairs found in Live/ and Live/Customers/.", file=sys.stderr)
@@ -562,6 +597,27 @@ def propagate(twbx_name: Optional[str] = None) -> None:
             old_twb = extract_twb_from_bytes(old_result.stdout, tmp_dir / "old")
             new_twb = extract_twb(main_path, tmp_dir / "new")
             changes = _diff_trees(ET.parse(old_twb), ET.parse(new_twb))
+
+        # #region agent log
+        add_mods  = [c for c in changes if c["action"] == "add_element"]
+        rem_mods  = [c for c in changes if c["action"] == "remove_element"]
+        chg_mods  = [c for c in changes if c["action"] == "change_attribute"]
+        zone_adds = [c for c in add_mods  if "<zone " in c.get("xml","") or "<zone>" in c.get("xml","")]
+        zone_rems = [c for c in rem_mods  if c.get("element_tag") == "zone"]
+        zone_chgs = [c for c in chg_mods  if c.get("tag") == "zone"]
+        id_chgs   = [c for c in chg_mods  if c.get("attribute") == "id"]
+        _dbg("computed_delta", {
+            "total_changes": len(changes),
+            "add_element": len(add_mods),
+            "remove_element": len(rem_mods),
+            "change_attribute": len(chg_mods),
+            "zone_adds": len(zone_adds),
+            "zone_removes": len(zone_rems),
+            "zone_attr_changes": len(zone_chgs),
+            "id_attr_changes": len(id_chgs),
+            "id_changes_sample": [{"tag":c.get("tag"),"old":c.get("old_value"),"new":c.get("new_value")} for c in id_chgs[:5]],
+            "zone_adds_sample": [c.get("xml","")[:120] for c in zone_adds[:3]],
+        }, "H1-H2-H3-H5")
 
         if not changes:
             print("  No changes detected; Customer is already up to date.")

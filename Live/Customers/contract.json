@@ -1,0 +1,38 @@
+{
+  "Sales.twbx": {
+    "description": "Differences between main Sales.twbx and customer Sales.twbx",
+    "xml_changes": {
+      "Sales.twb": {
+        "xpath_modifications": [
+          {
+            "action": "remove_element",
+            "parent_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/panes[1]",
+            "element_tag": "pane",
+            "element_key_attr": "id",
+            "element_key_value": "27"
+          },
+          {
+            "action": "change_text",
+            "element_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/rows[1]",
+            "old_text": "([federated.12si91c1t5yeas1d0h7sz0mpq2z7].[__tableau_internal_object_id__].[cnt:Sheet1_9930D93E838A445DBE8A073D1380CBEF:qk] + [federated.12si91c1t5yeas1d0h7sz0mpq2z7].[sum:Salary:qk])",
+            "new_text": "[federated.12si91c1t5yeas1d0h7sz0mpq2z7].[__tableau_internal_object_id__].[cnt:Sheet1_9930D93E838A445DBE8A073D1380CBEF:qk]"
+          },
+          {
+            "action": "remove_element",
+            "parent_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/view[1]/datasource-dependencies[1]",
+            "element_tag": "column",
+            "element_key_attr": "name",
+            "element_key_value": "[Salary]"
+          },
+          {
+            "action": "remove_element",
+            "parent_xpath": "./worksheets[1]/worksheet[@name='Sheet 1']/table[1]/view[1]/datasource-dependencies[1]",
+            "element_tag": "column-instance",
+            "element_key_attr": "name",
+            "element_key_value": "[sum:Salary:qk]"
+          }
+        ]
+      }
+    }
+  }
+}

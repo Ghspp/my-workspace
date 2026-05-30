@@ -1,0 +1,10 @@
+{
+  "Sales.twbx": {
+    "description": "Auto-generated differences between main Sales.twbx and customer Sales.twbx",
+    "xml_changes": {
+      "Sales.twb": {
+        "xpath_modifications": []
+      }
+    }
+  }
+}

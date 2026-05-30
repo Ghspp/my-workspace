@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import shutil
 import subprocess
@@ -387,7 +388,9 @@ def apply_diff(twbx_name: Optional[str] = None) -> None:
                 if modifications:
                     tree = ET.parse(output_twb)
                     applied = _apply_modifications(tree, modifications)
-                    tree.write(str(output_twb), encoding="unicode", xml_declaration=False)
+                    _buf = io.BytesIO()
+                    tree.write(_buf, encoding="utf-8", xml_declaration=True)
+                    output_twb.write_bytes(_buf.getvalue())
                     total_mods += applied
 
             repack_twbx(output_dir, customer_path)
@@ -576,7 +579,9 @@ def _apply_changes_to_customer(customer_path: Path, changes: List[Dict]) -> int:
 
         tree = ET.parse(cust_twb)
         applied = _apply_modifications(tree, changes)
-        tree.write(str(cust_twb), encoding="unicode", xml_declaration=False)
+        _buf = io.BytesIO()
+        tree.write(_buf, encoding="utf-8", xml_declaration=True)
+        cust_twb.write_bytes(_buf.getvalue())
 
         # #region agent log
         _cust_tree_post = _ET2.parse(str(cust_twb))
@@ -796,7 +801,9 @@ def repair(twbx_name: Optional[str] = None) -> None:
                     else:
                         seen_ids[key] = child
 
-            tree.write(str(cust_twb), encoding="unicode", xml_declaration=False)
+            _buf = io.BytesIO()
+            tree.write(_buf, encoding="utf-8", xml_declaration=True)
+            cust_twb.write_bytes(_buf.getvalue())
             repack_twbx(cust_extract, customer_path)
             print("  Removed " + str(removed) + " duplicate layout element(s) -> saved " + customer_path.name)
 

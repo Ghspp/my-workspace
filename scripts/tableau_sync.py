@@ -34,7 +34,10 @@ _KEY_ATTRS = ("name", "column", "attr", "id", "param", "caption")
 # Tableau internal layout tags whose IDs are regenerated on every save.
 # Structural add/remove of these elements must never be propagated — doing so
 # duplicates elements that already exist in the customer file.
-_TABLEAU_LAYOUT_TAGS = frozenset({"zone", "pane", "window", "point", "size"})
+# NOTE: 'pane' is intentionally NOT included — pane elements represent distinct
+# chart axes (e.g. a Salary Y-axis pane) and their structural changes are
+# semantic (not just ID regeneration) and must be captured in the contract.
+_TABLEAU_LAYOUT_TAGS = frozenset({"zone", "window", "point", "size"})
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +237,33 @@ def _diff_attrs(
                 modifications.append(mod)
 
 
+def _diff_text(
+    main_elem: ET.Element,
+    cust_elem: ET.Element,
+    modifications: List[Dict],
+    seen: Set[FrozenSet],
+    element_xpath: str = "",
+) -> None:
+    """Record a change_text modification when the text content of two matched elements differs."""
+    main_text = (main_elem.text or "").strip()
+    cust_text = (cust_elem.text or "").strip()
+    if main_text == cust_text:
+        return
+    dedup_key = frozenset([
+        ("xpath", element_xpath),
+        ("old_text", main_text),
+        ("new_text", cust_text),
+    ])
+    if dedup_key not in seen:
+        seen.add(dedup_key)
+        modifications.append({
+            "action": "change_text",
+            "element_xpath": element_xpath,
+            "old_text": main_text,
+            "new_text": cust_text,
+        })
+
+
 def _diff_children(
     main_elem: ET.Element,
     cust_elem: ET.Element,
@@ -302,8 +332,9 @@ def _diff_children(
                     "element_key_value": attr_val,
                 })
             else:
-                # Both have this element — compare attrs then recurse
+                # Both have this element — compare attrs, text content, then recurse
                 _diff_attrs(main_child, cust_child, modifications, seen, child_xpath)
+                _diff_text(main_child, cust_child, modifications, seen, child_xpath)
                 _diff_children(main_child, cust_child, child_xpath, modifications, seen)
 
         # --- Positional elements (no identity key) ---
@@ -313,6 +344,7 @@ def _diff_children(
         for i in range(min_len):
             child_xpath = parent_xpath + "/" + tag + "[" + str(i + 1) + "]"
             _diff_attrs(main_positional[i], cust_positional[i], modifications, seen, child_xpath)
+            _diff_text(main_positional[i], cust_positional[i], modifications, seen, child_xpath)
             _diff_children(main_positional[i], cust_positional[i], child_xpath, modifications, seen)
 
         # Extra positional elements in customer (added)
@@ -440,6 +472,19 @@ def _apply_modifications(tree: ET.ElementTree, modifications: List[Dict]) -> int
                         if elem.attrib.get(attribute) == old_value:
                             elem.set(attribute, new_value)
                             change_count += 1
+
+        # ------------------------------------------------------------------
+        # change_text  — replace the text content of a single element
+        # ------------------------------------------------------------------
+        elif action == "change_text":
+            element_xpath = mod.get("element_xpath", "")
+            old_text = mod.get("old_text", "")
+            new_text = mod.get("new_text", "")
+            if element_xpath:
+                target = root.find(element_xpath)
+                if target is not None and (target.text or "").strip() == old_text:
+                    target.text = new_text
+                    change_count += 1
 
         # ------------------------------------------------------------------
         # set_attribute  (unconditional set, no old_value check)
